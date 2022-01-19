@@ -1,6 +1,5 @@
 use crate::{FRAG_SHADER_HANDLE, VERT_SHADER_HANDLE};
 use bevy::{
-    core::cast_slice,
     ecs::system::{
         lifetimeless::{Read, SQuery, SRes},
         SystemParamItem,
@@ -11,7 +10,7 @@ use bevy::{
         render_component::{ComponentUniforms, DynamicUniformIndex, UniformComponentPlugin},
         render_phase::{EntityRenderCommand, RenderCommandResult, TrackedRenderPass},
         render_resource::{std140::AsStd140, *},
-        renderer::RenderDevice,
+        renderer::{RenderDevice, RenderQueue},
         texture::BevyDefault,
         view::{ViewUniform, ViewUniforms},
         RenderApp, RenderStage,
@@ -24,8 +23,9 @@ impl Plugin for PolylineRenderPlugin {
         app.add_plugin(UniformComponentPlugin::<PolylineUniform>::default());
         app.sub_app_mut(RenderApp)
             .init_resource::<PolylinePipeline>()
+            .init_resource::<PolylineBuffer>()
             .add_system_to_stage(RenderStage::Extract, extract_polylines)
-            .add_system_to_stage(RenderStage::Prepare, prepare_polylines)
+            .add_system_to_stage(RenderStage::Queue, queue_polylines)
             .add_system_to_stage(RenderStage::Queue, queue_polyline_bind_group)
             .add_system_to_stage(RenderStage::Queue, queue_polyline_view_bind_groups);
     }
@@ -40,13 +40,6 @@ pub struct Polyline {
 pub struct PolylineUniform {
     pub transform: Mat4,
     //pub inverse_transpose_model: Mat4,
-}
-
-/// The GPU-representation of a [`Polyline`]
-#[derive(Debug, Clone, Component)]
-pub struct GpuPolyline {
-    pub vertex_buffer: Buffer,
-    pub vertex_count: u32,
 }
 
 pub fn extract_polylines(
@@ -76,26 +69,51 @@ pub fn extract_polylines(
     commands.insert_or_spawn_batch(values);
 }
 
-fn prepare_polylines(
+/// The GPU-representation of a [`Polyline`]
+#[derive(Debug, Component)]
+pub struct GpuPolyline {
+    pub offset: usize,
+    pub vertex_count: u32,
+}
+
+pub struct PolylineBuffer {
+    buffer: BufferVec<Vec3>,
+}
+
+impl Default for PolylineBuffer {
+    fn default() -> Self {
+        Self {
+            buffer: BufferVec::new(BufferUsages::VERTEX),
+        }
+    }
+}
+
+fn queue_polylines(
     mut commands: Commands,
     query: Query<(Entity, &Polyline)>,
+    mut polyline_buffer: ResMut<PolylineBuffer>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
 ) {
-    for (entity, polyline) in query.iter() {
-        let vertex_buffer_data = cast_slice(polyline.vertices.as_slice());
-        let vertex_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            usage: BufferUsages::VERTEX,
-            label: Some("Polyline Vertex Buffer"),
-            contents: vertex_buffer_data,
-        });
+    polyline_buffer.buffer.clear();
 
+    for (entity, polyline) in query.iter() {
+        let offset = polyline_buffer.buffer.len();
         let gpu_polyline = GpuPolyline {
-            vertex_buffer,
+            offset,
             vertex_count: polyline.vertices.len() as u32,
         };
 
+        for &point in &polyline.vertices {
+            polyline_buffer.buffer.push(point);
+        }
+
         commands.entity(entity).insert(gpu_polyline);
     }
+
+    polyline_buffer
+        .buffer
+        .write_buffer(&*render_device, &*render_queue);
 }
 
 #[derive(Clone)]
@@ -394,18 +412,27 @@ impl<const I: usize> EntityRenderCommand for SetPolylineBindGroup<I> {
 
 pub struct DrawPolyline;
 impl EntityRenderCommand for DrawPolyline {
-    type Param = (SQuery<Read<GpuPolyline>>,);
+    type Param = (SRes<PolylineBuffer>, SQuery<Read<GpuPolyline>>);
     #[inline]
     fn render<'w>(
         _view: Entity,
         item: Entity,
-        (pl_query,): SystemParamItem<'w, '_, Self::Param>,
+        (polyline_buffer, pl_query): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let gpu_polyline = pl_query.get(item).unwrap();
-        pass.set_vertex_buffer(0, gpu_polyline.vertex_buffer.slice(..));
+
+        let buffer = polyline_buffer
+            .into_inner()
+            .buffer
+            .buffer()
+            .unwrap()
+            .slice(..);
+
+        pass.set_vertex_buffer(0, buffer);
+        let offset = gpu_polyline.offset as u32;
         let num_instances = gpu_polyline.vertex_count.max(1) - 1;
-        pass.draw(0..6, 0..num_instances);
+        pass.draw(0..6, offset..offset + num_instances);
 
         RenderCommandResult::Success
     }
