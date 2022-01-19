@@ -2,7 +2,7 @@ use bevy::{prelude::*, reflect::TypeUuid};
 pub use material::PolylineMaterial;
 use material::PolylineMaterialPlugin;
 pub use polyline::Polyline;
-use polyline::{PolylineBasePlugin, PolylineRenderPlugin};
+use polyline::PolylineRenderPlugin;
 
 pub mod material;
 pub mod polyline;
@@ -31,15 +31,14 @@ impl Plugin for PolylinePlugin {
                 naga::ShaderStage::Vertex,
             ),
         );
-        app.add_plugin(PolylineBasePlugin)
-            .add_plugin(PolylineRenderPlugin)
+        app.add_plugin(PolylineRenderPlugin)
             .add_plugin(PolylineMaterialPlugin);
     }
 }
 
 #[derive(Bundle, Default)]
 pub struct PolylineBundle {
-    pub polyline: Handle<Polyline>,
+    pub polyline: Polyline,
     pub material: Handle<PolylineMaterial>,
     pub transform: Transform,
     pub global_transform: GlobalTransform,

@@ -7,9 +7,7 @@ use bevy::{
     },
     pbr::{GlobalLightMeta, LightMeta, ViewClusterBindings, ViewShadowBindings},
     prelude::*,
-    reflect::TypeUuid,
     render::{
-        render_asset::{RenderAsset, RenderAssetPlugin, RenderAssets},
         render_component::{ComponentUniforms, DynamicUniformIndex, UniformComponentPlugin},
         render_phase::{EntityRenderCommand, RenderCommandResult, TrackedRenderPass},
         render_resource::{std140::AsStd140, *},
@@ -20,15 +18,6 @@ use bevy::{
     },
 };
 
-pub struct PolylineBasePlugin;
-
-impl Plugin for PolylineBasePlugin {
-    fn build(&self, app: &mut App) {
-        app.add_asset::<Polyline>()
-            .add_plugin(RenderAssetPlugin::<Polyline>::default());
-    }
-}
-
 pub struct PolylineRenderPlugin;
 impl Plugin for PolylineRenderPlugin {
     fn build(&self, app: &mut App) {
@@ -36,47 +25,15 @@ impl Plugin for PolylineRenderPlugin {
         app.sub_app_mut(RenderApp)
             .init_resource::<PolylinePipeline>()
             .add_system_to_stage(RenderStage::Extract, extract_polylines)
+            .add_system_to_stage(RenderStage::Prepare, prepare_polylines)
             .add_system_to_stage(RenderStage::Queue, queue_polyline_bind_group)
             .add_system_to_stage(RenderStage::Queue, queue_polyline_view_bind_groups);
     }
 }
 
-#[derive(Debug, Default, Component, Clone, TypeUuid)]
-#[uuid = "c76af88a-8afe-405c-9a64-0a7d845d2546"]
+#[derive(Debug, Default, Component, Clone)]
 pub struct Polyline {
     pub vertices: Vec<Vec3>,
-}
-
-impl RenderAsset for Polyline {
-    type ExtractedAsset = Polyline;
-
-    type PreparedAsset = GpuPolyline;
-
-    type Param = SRes<RenderDevice>;
-
-    fn extract_asset(&self) -> Self::ExtractedAsset {
-        self.clone()
-    }
-
-    fn prepare_asset(
-        polyline: Self::ExtractedAsset,
-        render_device: &mut bevy::ecs::system::SystemParamItem<Self::Param>,
-    ) -> Result<
-        Self::PreparedAsset,
-        bevy::render::render_asset::PrepareAssetError<Self::ExtractedAsset>,
-    > {
-        let vertex_buffer_data = cast_slice(polyline.vertices.as_slice());
-        let vertex_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            usage: BufferUsages::VERTEX,
-            label: Some("Polyline Vertex Buffer"),
-            contents: vertex_buffer_data,
-        });
-
-        Ok(GpuPolyline {
-            vertex_buffer,
-            vertex_count: polyline.vertices.len() as u32,
-        })
-    }
 }
 
 #[derive(AsStd140, Component, Clone)]
@@ -86,7 +43,7 @@ pub struct PolylineUniform {
 }
 
 /// The GPU-representation of a [`Polyline`]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Component)]
 pub struct GpuPolyline {
     pub vertex_buffer: Buffer,
     pub vertex_count: u32,
@@ -95,23 +52,19 @@ pub struct GpuPolyline {
 pub fn extract_polylines(
     mut commands: Commands,
     mut previous_len: Local<usize>,
-    query: Query<(
-        Entity,
-        &ComputedVisibility,
-        &GlobalTransform,
-        &Handle<Polyline>,
-    )>,
+    query: Query<(Entity, &ComputedVisibility, &GlobalTransform, &Polyline)>,
 ) {
     let mut values = Vec::with_capacity(*previous_len);
-    for (entity, computed_visibility, transform, handle) in query.iter() {
+    for (entity, computed_visibility, transform, polyline) in query.iter() {
         if !computed_visibility.is_visible {
             continue;
         }
+
         let transform = transform.compute_matrix();
         values.push((
             entity,
             (
-                handle.clone_weak(),
+                polyline.clone(),
                 PolylineUniform {
                     transform,
                     //inverse_transpose_model: transform.inverse().transpose(),
@@ -121,6 +74,28 @@ pub fn extract_polylines(
     }
     *previous_len = values.len();
     commands.insert_or_spawn_batch(values);
+}
+
+fn prepare_polylines(
+    mut commands: Commands,
+    query: Query<(Entity, &Polyline)>,
+    render_device: Res<RenderDevice>,
+) {
+    for (entity, polyline) in query.iter() {
+        let vertex_buffer_data = cast_slice(polyline.vertices.as_slice());
+        let vertex_buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            usage: BufferUsages::VERTEX,
+            label: Some("Polyline Vertex Buffer"),
+            contents: vertex_buffer_data,
+        });
+
+        let gpu_polyline = GpuPolyline {
+            vertex_buffer,
+            vertex_count: polyline.vertices.len() as u32,
+        };
+
+        commands.entity(entity).insert(gpu_polyline);
+    }
 }
 
 #[derive(Clone)]
@@ -419,22 +394,19 @@ impl<const I: usize> EntityRenderCommand for SetPolylineBindGroup<I> {
 
 pub struct DrawPolyline;
 impl EntityRenderCommand for DrawPolyline {
-    type Param = (SRes<RenderAssets<Polyline>>, SQuery<Read<Handle<Polyline>>>);
+    type Param = (SQuery<Read<GpuPolyline>>,);
     #[inline]
     fn render<'w>(
         _view: Entity,
         item: Entity,
-        (polylines, pl_query): SystemParamItem<'w, '_, Self::Param>,
+        (pl_query,): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let pl_handle = pl_query.get(item).unwrap();
-        if let Some(gpu_polyline) = polylines.into_inner().get(pl_handle) {
-            pass.set_vertex_buffer(0, gpu_polyline.vertex_buffer.slice(..));
-            let num_instances = gpu_polyline.vertex_count.max(1) - 1;
-            pass.draw(0..6, 0..num_instances);
-            RenderCommandResult::Success
-        } else {
-            RenderCommandResult::Failure
-        }
+        let gpu_polyline = pl_query.get(item).unwrap();
+        pass.set_vertex_buffer(0, gpu_polyline.vertex_buffer.slice(..));
+        let num_instances = gpu_polyline.vertex_count.max(1) - 1;
+        pass.draw(0..6, 0..num_instances);
+
+        RenderCommandResult::Success
     }
 }

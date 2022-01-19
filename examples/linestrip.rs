@@ -16,10 +16,9 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
     mut polyline_materials: ResMut<Assets<PolylineMaterial>>,
-    mut polylines: ResMut<Assets<Polyline>>,
 ) {
     commands.spawn_bundle(PolylineBundle {
-        polyline: polylines.add(Polyline {
+        polyline: Polyline {
             vertices: vec![
                 Vec3::new(-0.5, -0.5, -0.5),
                 Vec3::new(0.5, -0.5, -0.5),
@@ -31,7 +30,7 @@ fn setup(
                 Vec3::new(-0.5, -0.5, 0.5),
             ],
             ..Default::default()
-        }),
+        },
         material: polyline_materials.add(PolylineMaterial {
             width: 3.0,
             color: Color::RED,
